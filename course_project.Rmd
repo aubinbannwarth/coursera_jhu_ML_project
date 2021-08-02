@@ -1,0 +1,185 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "Aubin Bannwarth"
+date: "02/08/2021"
+output: 
+  html_document:
+    keep_md: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning =  FALSE, cache = TRUE)
+```
+
+## Summary
+A total of 6 participants were asked to perform a weight lifting exercise in one of 5 ways (labeled A-E) while wearing equipment that recorded kinematic data. A `train` data frame containing the experimental observations is provided, and our aim in this report will be to fit a model on the `train` set in order to correctly classify 20 new observations in a `test` set.  
+
+We detail the model selection process and performance evaluation below.
+
+## Prerequisites
+
+We will be using the `tidyverse` and `tidymodels` packages.
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+```
+
+In particular, we will be using the more recent `parsnip` engine from `tidymodels` rather than `caret` as in the lectures. I found the `tidymodels` framework interesting and thought it would be valuable for the reviewer to see a demonstration. A good introduction to learn these packages is the online book [Tidy Models with R](https://www.tmwr.org/) and author Julia Silge's [blog](https://juliasilge.com/).
+
+## Downloading the data:
+
+```{r}
+train_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+test_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+if (!file.exists("training.csv")){
+  download.file(train_url,"training.csv")
+  download.file(test_url, "testing.csv")
+}
+
+train <- read_csv("training.csv")
+test <- read_csv("testing.csv")
+```
+
+## Model selection and specification
+
+Since our aim is to maximise prediction accuracy, we will fit a **random forest** model using the `randomForest` package. We choose the random forest due to its reputation for having great out-of-the-box performance with minimal tuning required. 
+
+```{r}
+rf_model <- rand_forest(trees = 450, min_n = tune(), mtry = tune()) %>%
+  set_engine("randomForest") %>%
+  set_mode("classification")
+```
+
+We have made the following choices for the hyperparameters:
+
+* `trees = 450` : As we will see below, after feature engineering and selection we will have a set of 29 PCA components left as features. A typical rule is to set the number of trees to at least 10 times the number of features, so we meet this requirement.
+
+* `min_n` and `mtry` have been set equal to `tune()`. This will allow us to perform a grid search below over a range of values for each of these parameters. `min_n` is the minimum node-size in each tree, while `mtry` corresponds to the number of randomly selected predictors that would be considered at each split when bulding a tree.
+
+## Feature selection and engineering
+The first few observations of the `train` frame are shown below
+```{r}
+train %>% head(5)
+```
+The first 5 columns will not be used in the predictive model for the following reasons:
+
+* `X1` simply contains the row number for the observation. Since this is just a bookkeeping variable, it should have no predictive value.
+* `user_name` specifies the name of the person performing the exercise. While this may have some value if we were to predict on an observation by one of the 6 subjects in the original study, we would not expect it to generalise to a previously unseed individual. 
+* The next 3 columns contain information about the time and date on which the observation was recorded. Again, we should not expect this information to be useful in making predictions about new data. 
+
+
+Let's also look at the distribution of missing values across the remaining features:
+
+```{r}
+missing <- train %>% 
+  select(-1, -classe, -contains("timestamp"), -user_name) %>%
+  mutate(across(everything(), is.na)) %>%
+  summarise(across(everything(), mean)) %>%
+  gather(everything(), key = "feature", value = "missing_frac") 
+
+missing %>% count(missing_frac)
+```
+We see that there are 54 predictors left with 0 missing values, while the other predictors have in excess of 97% missing values. We will drop all these extra features, leaving us with a final set of 54 predictors that we put in a `features` character vector:
+
+```{r}
+features <- missing %>%
+  filter(missing_frac == 0) %>%
+  .$feature
+```
+
+Next, we will create a pre-processing object `rf_recipe` that selects these features for use in our model, and further performs some engineering like normalization and dimension reduction using PCA.
+```{r}
+rf_recipe <- recipe(classe ~ ., data = train) %>%
+  step_rm(-all_of(features), -classe) %>% #keep only outcome & our 54 features
+  step_nzv(all_predictors()) %>% #discard near-zero variance predictors
+  step_YeoJohnson(all_numeric()) %>% 
+  step_normalize(all_numeric()) %>% #scales and centres all numeric predictors
+  step_pca(all_numeric(), threshold = .95) #calculate PCA components
+  
+```
+
+We have chosen `threshold = 0.95` for the PCA extraction, as this is a typical value
+in the literature for similar problems. We could also have set it to `tune()` to include it in our grid search, but decided against it to keep computational requirements to a manageable level. 
+
+We can get a sense of what `rf_recipe` achieves by applying it to the `train` set:
+
+```{r}
+rf_recipe %>% prep(train) %>% bake(train)
+```
+
+We see that a total of 29 PCA components have been extracted and will be used in the final model. 
+
+## Assembling workflow
+
+Having specified a model and recipe, these can now be combined in a `workflow`:
+
+```{r}
+rf_workflow <- workflow() %>%
+  add_recipe(rf_recipe) %>%
+  add_model(rf_model)
+```
+
+We now manually specify some range of values for the two parameters we intend to tune:
+
+```{r}
+rf_params <- rf_workflow %>%
+  parameters() %>%
+  update(
+    min_n = min_n(c(1, 10)),
+    mtry = mtry(c(5,29))
+  )
+```
+
+## Creating Resampling Folds
+We'll use 5-fold cross validation to evaluate model performance. We choose this over 10-fold CV to reduce computational demands. The following code uses the `rsample` package to create the resamples and puts them in a `train_folds` object:
+
+```{r}
+train_folds <- vfold_cv(train, v = 5)
+```
+
+## Performing grid search and fitting final model
+
+We can now perform the grid search by calling the `tune_grid` function on our `rf_workflow` object. For the `grid` argument, we take our `rf_params` object that contains our parameter ranges, and pass it to `grid_regular()` with `levels = 3`. This creates 3x3 cartesian grid of parameter values. There are 3 equally spaced values for both `mtry` and `min_n` across the ranges specified above, giving us a total of 9 different models. 
+
+```{r}
+set.seed(123)
+
+rf_tune <- rf_workflow %>%
+  tune_grid(
+    train_folds,
+    grid = rf_params %>% grid_regular(levels = 3),
+    metrics = metric_set(accuracy)
+  )
+```
+
+Each of the nine models is fit and evaluated on the `train_folds` object. The `autoplot()` function allows us to compare the accuracy estimates for each of these models:
+
+```{r}
+autoplot(rf_tune)
+```
+
+We see that our best model is that with `mtry = 5` and `min_n = 1`. Based on the observed trend, we could perform another grid search investigating the smaller values of `mtry`, but for the purposes of this assignment this is good enough. We now finalise our workflow with these parameter values, and fit it to the training data:
+```{r}
+best_params <- rf_tune %>% select_best() %>% select(-.config)
+final_rf_workflow <- rf_workflow %>% finalize_workflow(best_params)
+
+final_rf_fit <- final_rf_workflow %>% fit(train)
+```
+
+
+
+## Predicting on the test set:
+
+The estimated accuracy for our best model, as seen on the plot above, exceeds 98%. Therefore, since there are 20 observations in the test set, an expected value for the number of correct predictions is simply $20\cdot 0.98 = 19.6$, i.e. we expect to get almost all of them correct.
+
+We make our predictions using the code below:
+```{r}
+predictions <- predict(final_rf_fit, test)
+
+predictions
+```
+
+
+Entering these values into the course project prediction quiz confirms that we indeed achieved 100% accuracy on the test set. 
