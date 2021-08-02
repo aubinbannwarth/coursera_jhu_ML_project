@@ -261,7 +261,7 @@ test &lt;- read_csv(&quot;testing.csv&quot;)</code></pre>
 <p>The first 5 columns will not be used in the predictive model for the following reasons:</p>
 <ul>
 <li><code>X1</code> simply contains the row number for the observation. Since this is just a bookkeeping variable, it should have no predictive value.</li>
-<li><code>user_name</code> specifies the name of the person performing the exercise. While this may have some value if we were to predict on an observation by one of the 6 subjects in the original study, we would not expect it to generalise to a previously unseed individual.</li>
+<li><code>user_name</code> specifies the name of the person performing the exercise. While this may have some value if we were to predict on an observation by one of the 6 subjects in the original study, we would not expect it to generalise to a previously unseen individual.</li>
 <li>The next 3 columns contain information about the time and date on which the observation was recorded. Again, we should not expect this information to be useful in making predictions about new data.</li>
 </ul>
 <p>Let’s also look at the distribution of missing values across the remaining features:</p>
@@ -357,7 +357,7 @@ final_rf_fit &lt;- final_rf_workflow %&gt;% fit(train)</code></pre>
 </div>
 <div id="predicting-on-the-test-set" class="section level2">
 <h2>Predicting on the test set:</h2>
-<p>The estimated accuracy for our best model, as seen on the plot above, exceeds 98%. Therefore, since there are 20 observations in the test set, an expected value for the number of correct predictions is simply <span class="math inline">\(20\cdot 0.98 = 19.6\)</span>, i.e. we expect to get almost all of them correct.</p>
+<p>The estimated accuracy for our best model, as seen on the plot above, exceeds 98%. Therefore, since there are 20 observations in the test set, an expected value for the number of correct predictions is simply 20*0.98 = 19.6, i.e. we expect to get almost all of them correct.</p>
 <p>We make our predictions using the code below:</p>
 <pre class="r"><code>predictions &lt;- predict(final_rf_fit, test)
 
